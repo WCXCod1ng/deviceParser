@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -51,15 +50,15 @@ func extractKeysFromFile(filePath string) ([]string, error) {
 }
 
 // extractDataFromFile 只负责从单个文件中提取数据
-func extractDataFromFile(filePath string) (lot, wafer string, counts map[string]int, err error) {
+func extractDataFromFile(filePath string) (fileResult, error) {
 	content, err := os.ReadFile(filePath)
 	if err != nil {
-		return "", "", nil, fmt.Errorf("读取文件失败: %w", err)
+		return fileResult{}, fmt.Errorf("读取文件失败: %w", err)
 	}
 
-	isNumericRegex, _ := regexp.Compile(`^\d+$`)
 	lines := strings.Split(string(content), "\n")
-	counts = make(map[string]int)
+	counts := make(map[string]int)
+	var lot, wafer string
 
 	for _, line := range lines {
 		cleanLine := strings.TrimSpace(line)
@@ -70,7 +69,7 @@ func extractDataFromFile(filePath string) (lot, wafer string, counts map[string]
 		} else if strings.HasPrefix(cleanLine, "RowData:") {
 			fields := strings.Fields(strings.TrimPrefix(cleanLine, "RowData:"))
 			for _, field := range fields {
-				if isNumericRegex.MatchString(field) {
+				if field != "___" && field != "..." {
 					counts[field]++
 				}
 			}
@@ -78,9 +77,20 @@ func extractDataFromFile(filePath string) (lot, wafer string, counts map[string]
 	}
 
 	if len(counts) == 0 {
-		return lot, wafer, counts, ErrNoData
+		return fileResult{
+			FileName: filepath.Base(filePath),
+			Lot:      lot,
+			Wafer:    wafer,
+			Counts:   counts,
+		}, ErrNoData
 	}
-	return lot, wafer, counts, nil
+
+	return fileResult{
+		FileName: filepath.Base(filePath),
+		Lot:      lot,
+		Wafer:    wafer,
+		Counts:   counts,
+	}, nil
 }
 
 func configButtonClickHandler(itemListBinding binding.List[string], parentWindow fyne.Window, myApp fyne.App) {
@@ -201,7 +211,7 @@ func showMappingEditor(a fyne.App, keys []string) {
 	}
 
 	saveButton := widget.NewButton("保存", func() {
-		if selectedKey != "" {
+		if selectedKey != "" && strings.TrimSpace(nameEntry.Text) != "" {
 			dynamicBinNameMapping[selectedKey] = nameEntry.Text
 			refreshList()      // 刷新列表以显示更新后的映射
 			list.UnselectAll() // 清除选择状态

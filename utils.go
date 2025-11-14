@@ -4,119 +4,130 @@ import (
 	"bytes"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
-	"time"
 
 	"github.com/xuri/excelize/v2"
 )
 
 // writeToExcel 负责将处理好的数据写入Excel文件
-func writeToExcel(outputFilePath string, title string, counts map[string]int, mapping map[string]string, defaultPrefix string) error {
-	var records []record
-	var sortedKeys []string
-	for k := range counts {
-		sortedKeys = append(sortedKeys, k)
-	}
-	sort.Strings(sortedKeys)
-
-	for _, key := range sortedKeys {
-		name, ok := mapping[key]
-		if !ok {
-			name = defaultPrefix + key
-		}
-		records = append(records, record{name: name, key: key, count: counts[key]})
+func writeToExcel(outputFilePath string, title string, results []fileResult, mapping map[string]string, defaultPrefix string) error {
+	if len(results) == 0 {
+		return ErrNoData
 	}
 
 	f := excelize.NewFile()
 	sheetName := "Sheet1"
 
-	numCols := len(records)
-	if numCols == 0 {
+	// 1. 汇总所有文件中出现过的、独一无二的key，并进行排序
+	allKeysSet := make(map[string]struct{})
+	for _, result := range results {
+		for key := range result.Counts {
+			allKeysSet[key] = struct{}{}
+		}
+	}
+	var sortedAllKeys []string
+	for k := range allKeysSet {
+		sortedAllKeys = append(sortedAllKeys, k)
+	}
+	sort.Strings(sortedAllKeys)
+
+	// 如果所有文件中都没有数据，也返回错误
+	if len(sortedAllKeys) == 0 {
 		return ErrNoData
 	}
 
-	endCellCol, _ := excelize.ColumnNumberToName(numCols)
+	// --- 2. 新增：写入跨列居中的主标题行 (第1行) ---
+	numDataCols := len(sortedAllKeys) + 1 // 数据列数 = key的数量 + 1 (文件名列)
+	endCellCol, _ := excelize.ColumnNumberToName(numDataCols)
+
+	// 合并第一行的所有单元格
 	f.MergeCell(sheetName, "A1", fmt.Sprintf("%s1", endCellCol))
-	titleStyle, _ := f.NewStyle(&excelize.Style{Alignment: &excelize.Alignment{Horizontal: "center", Vertical: "center"}, Font: &excelize.Font{Bold: true, Size: 12}})
+
+	// 创建并应用标题样式
+	titleStyle, _ := f.NewStyle(&excelize.Style{
+		Font:      &excelize.Font{Bold: true, Size: 14}, // 标题字体可以大一些
+		Alignment: &excelize.Alignment{Horizontal: "center", Vertical: "center"},
+	})
 	f.SetCellStyle(sheetName, "A1", fmt.Sprintf("%s1", endCellCol), titleStyle)
 	f.SetCellValue(sheetName, "A1", title)
 
-	centeredStyle, _ := f.NewStyle(&excelize.Style{Alignment: &excelize.Alignment{Horizontal: "center", Vertical: "center"}})
-
-	// --- 写入表头 (第二行) 和数据 (第三行) ---
-	for i, rec := range records {
-		colNum := i + 1
-		colName, _ := excelize.ColumnNumberToName(colNum)
-
-		// 准备要写入第二行和第三行的文本
-		textForRow2 := fmt.Sprintf("%s (%s)", rec.name, rec.key)
-		textForRow3 := fmt.Sprintf("%d", rec.count) // 将数字也转为字符串以便计算宽度
-
-		// 写入第二行
-		cell2 := fmt.Sprintf("%s2", colName)
-		f.SetCellValue(sheetName, cell2, textForRow2)
-		f.SetCellStyle(sheetName, cell2, cell2, centeredStyle)
-
-		// 写入第三行
-		cell3 := fmt.Sprintf("%s3", colName)
-		f.SetCellValue(sheetName, cell3, rec.count)
-		f.SetCellStyle(sheetName, cell3, cell3, centeredStyle)
-
-		// --- 动态计算并设置列宽 ---
-		// 1. 分别计算两行文本的估算宽度
-		width2 := calculateApproxTextWidth(textForRow2)
-		width3 := calculateApproxTextWidth(textForRow3)
-
-		// 2. 取两者中的最大值作为此列的宽度
-		maxWidth := width2
-		if width3 > maxWidth {
-			maxWidth = width3
-		}
-
-		// 3. 应用计算出的宽度
-		f.SetColWidth(sheetName, colName, colName, maxWidth)
-	}
-
-	// --- 时区与 DocProps 设置 ---
-	// 使用系统全局 time.Local（在 main 中已设置为 Asia/Shanghai）
-	now := nowISO8601()
-	// 显式设置文档属性，避免 fallback 时间问题
-	_ = f.SetDocProps(&excelize.DocProperties{
-		Created:     now,
-		Modified:    now,
-		Creator:     "deviceParser",
-		Description: "RowData Results",
+	// 3. 写入表头行
+	// 设置样式
+	headerStyle, _ := f.NewStyle(&excelize.Style{
+		Font:      &excelize.Font{Bold: true},
+		Alignment: &excelize.Alignment{Horizontal: "center", Vertical: "center"},
 	})
 
-	// --- 将内容写入临时英文路径，然后重命名到目标路径 ---
+	// 用于存储每列所需的最大宽度
+	colWidths := make(map[int]float64)
+
+	// 写入 "文件名" 表头 (A2)
+	f.SetCellValue(sheetName, "A2", "文件名")
+	f.SetCellStyle(sheetName, "A2", "A2", headerStyle)
+	colWidths[1] = calculateApproxTextWidth("文件名") // 初始宽度
+
+	// 写入所有 key 的表头 (B2, C2, ...)
+	for i, key := range sortedAllKeys {
+		colNum := i + 2 // 从第2列 (B) 开始
+		colName, _ := excelize.ColumnNumberToName(colNum)
+
+		name, ok := mapping[key]
+		if !ok {
+			name = defaultPrefix + key
+		}
+		headerText := fmt.Sprintf("%s (%s)", name, key)
+
+		f.SetCellValue(sheetName, fmt.Sprintf("%s2", colName), headerText)
+		f.SetCellStyle(sheetName, fmt.Sprintf("%s2", colName), fmt.Sprintf("%s2", colName), headerStyle)
+		colWidths[colNum] = calculateApproxTextWidth(headerText)
+	}
+
+	// 4. 逐行写入每个文件的数据
+	centeredStyle, _ := f.NewStyle(&excelize.Style{Alignment: &excelize.Alignment{Horizontal: "center"}})
+	for i, result := range results {
+		rowNum := i + 3 // 从第3行开始
+
+		// 写入文件名 (列 A)
+		f.SetCellValue(sheetName, fmt.Sprintf("A%d", rowNum), result.FileName)
+		// 动态更新文件名列的所需宽度
+		fileNameWidth := calculateApproxTextWidth(result.FileName)
+		if fileNameWidth > colWidths[1] {
+			colWidths[1] = fileNameWidth
+		}
+
+		// 写入每个 key 对应的计数值
+		for j, key := range sortedAllKeys {
+			colNum := j + 2
+			colName, _ := excelize.ColumnNumberToName(colNum)
+			cellName := fmt.Sprintf("%s%d", colName, rowNum)
+
+			// 如果当前文件没有这个key，则填0
+			count, ok := result.Counts[key]
+			if !ok {
+				count = 0
+			}
+			f.SetCellValue(sheetName, cellName, count)
+			f.SetCellStyle(sheetName, cellName, cellName, centeredStyle)
+		}
+	}
+
+	// 5. 应用计算好的所有列的宽度
+	for colNum, width := range colWidths {
+		colName, _ := excelize.ColumnNumberToName(colNum)
+		f.SetColWidth(sheetName, colName, colName, width)
+	}
+
+	// 6. 设置文档属性并保存
+	now := nowISO8601()
+	_ = f.SetDocProps(&excelize.DocProperties{Created: now, Modified: now, Creator: "deviceParser"})
+
 	buffer := new(bytes.Buffer)
-	if _, err := f.WriteTo(buffer); err != nil {
-		return fmt.Errorf("将Excel数据写入内存失败: %w", err)
+	if err := f.Write(buffer); err != nil {
+		return fmt.Errorf("写入内存失败: %w", err)
 	}
 
-	// 临时文件名放在 os.TempDir() 下，尽量使用 ASCII 名称
-	tmpFileName := fmt.Sprintf("tmp_excel_%d.xlsx", time.Now().UnixNano())
-	tmpPath := filepath.Join(os.TempDir(), tmpFileName)
-
-	// 写入临时文件
-	if err := os.WriteFile(tmpPath, buffer.Bytes(), 0644); err != nil {
-		return fmt.Errorf("保存临时Excel文件失败: %w", err)
-	}
-
-	// 重命名到目标路径（覆盖同名文件）
-	if err := os.Rename(tmpPath, outputFilePath); err != nil {
-		// 如果跨设备移动失败（rare），尝试拷贝后删除
-		in, rerr := os.ReadFile(tmpPath)
-		if rerr != nil {
-			_ = os.Remove(tmpPath)
-			return fmt.Errorf("重命名临时文件失败: %v，且临时文件读取失败: %w", err, rerr)
-		}
-		if werr := os.WriteFile(outputFilePath, in, 0644); werr != nil {
-			_ = os.Remove(tmpPath)
-			return fmt.Errorf("重命名失败: %v；拷贝到目标失败: %w", err, werr)
-		}
-		_ = os.Remove(tmpPath)
+	if err := os.WriteFile(outputFilePath, buffer.Bytes(), 0644); err != nil {
+		return fmt.Errorf("保存到磁盘失败: %w", err)
 	}
 
 	return nil

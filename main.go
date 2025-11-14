@@ -1,7 +1,6 @@
 package main
 
 import (
-	"embed"
 	"errors"
 	"fmt"
 	_ "image/png"
@@ -23,23 +22,6 @@ import (
 )
 
 // 全局状态：用于存储用户动态配置的映射
-
-var (
-	//go:embed rsc/icon.png
-	iconFile embed.FS
-
-	dynamicBinNameMapping = make(map[string]string)
-	defaultPrefix         = "BIN"
-
-	ErrNoData = errors.New("no data found")
-)
-
-// record 结构体 (保持不变)
-type record struct {
-	name  string
-	key   string
-	count int
-}
 
 func nowISO8601() string {
 	loc, _ := time.LoadLocation("Asia/Shanghai")
@@ -256,11 +238,6 @@ func main() {
 			finalOutputDir = outputRootPath // 直接输出到根目录
 		}
 
-		if len(filesToProcess) == 0 {
-			dialog.ShowInformation("提示", "没有找到需要处理的 .txt 文件。", mainWindow)
-			return
-		}
-
 		// 创建最终输出目录 (如果不存在)
 		if err := os.MkdirAll(finalOutputDir, 0755); err != nil {
 			dialog.ShowError(fmt.Errorf("创建输出目录失败: %w", err), mainWindow)
@@ -268,6 +245,29 @@ func main() {
 		}
 
 		statusLabel.SetText(fmt.Sprintf("开始处理 %d 个文件...", len(filesToProcess)))
+
+		// --- 数据提取循环 ---
+		var results []fileResult
+		for i, fPath := range filesToProcess {
+			statusLabel.SetText(fmt.Sprintf("正在提取数据: %d/%d", i+1, len(filesToProcess)))
+			result, err := extractDataFromFile(fPath)
+			if err != nil {
+				if errors.Is(err, ErrNoData) {
+					continue // 静默跳过没有数据的文件
+				}
+				dialog.ShowError(fmt.Errorf("意外错误: %w", err), mainWindow)
+				return
+			}
+			results = append(results, result)
+		}
+
+		if len(results) == 0 {
+			dialog.ShowInformation("提示", "所有文件中都没有提取到有效数据。", mainWindow)
+			return
+		}
+
+		// 结果标题
+		title := "处理结果"
 
 		// 区分是否开启汇总
 		if summarizeCheck.Checked {
@@ -282,104 +282,44 @@ func main() {
 				summaryFileName = summaryFileName + ".xlsx"
 			}
 
-			summaryCounts := make(map[string]int)
-			var summaryLotWafers []string
-
-			for i, fPath := range filesToProcess {
-				statusLabel.SetText(fmt.Sprintf("正在汇总: %d/%d", i+1, len(filesToProcess)))
-				lot, wafer, counts, err := extractDataFromFile(fPath)
-				if err != nil {
-					if errors.Is(err, ErrNoData) {
-						continue // 跳过没有数据的文件
-					}
-					dialog.ShowError(fmt.Errorf("处理文件 %s 出错: %w", fPath, err), mainWindow)
-					return // 遇到错误则停止
-				}
-
-				if lot != "" && wafer != "" {
-					summaryLotWafers = append(summaryLotWafers, fmt.Sprintf("%s-%s", lot, wafer))
-				}
-				for key, count := range counts {
-					summaryCounts[key] += count
-				}
-			}
-
-			if len(summaryCounts) == 0 {
-				dialog.ShowInformation("提示", "所有文件中都没有提取到有效数据。", mainWindow)
-				return
-			}
-
-			summaryTitle := "汇总报告: " + strings.Join(summaryLotWafers, ", ")
 			outputFilePath := filepath.Join(outputRootPath, fmt.Sprintf("%s", summaryFileName))
 
-			err := writeToExcel(outputFilePath, summaryTitle, summaryCounts, dynamicBinNameMapping, defaultPrefix)
+			// 写入Excel
+			err := writeToExcel(outputFilePath, title, results, dynamicBinNameMapping, defaultPrefix)
 			if err != nil {
 				dialog.ShowError(fmt.Errorf("写入汇总文件失败: %w", err), mainWindow)
 				return
 			}
+
 			statusLabel.SetText("汇总处理完成！")
 			dialog.ShowInformation("成功", fmt.Sprintf("所有文件已汇总处理完毕！\n结果保存在: %s", outputFilePath), mainWindow)
-
 		} else {
 			// ******************************************************
 			// *** 模式: 独立文件 (这是您需要补充完整的部分) ***
 			// ******************************************************
-			statusLabel.SetText(fmt.Sprintf("开始独立处理 %d 个文件...", len(filesToProcess)))
 
-			// 决定最终输出目录
-			if fileInfo.IsDir() {
-				// 如果输入是文件夹, 创建 a results 子文件夹
-				newFolderName := fmt.Sprintf("%s_results", filepath.Base(inputPath))
-				finalOutputDir = filepath.Join(outputRootPath, newFolderName)
-			} else {
-				// 如果输入是单文件, 直接使用输出根目录
-				finalOutputDir = outputRootPath
-			}
+			// 在这个模式下，我们仍然需要循环，但每次只写入一个文件的结果
+			for i, result := range results {
+				statusLabel.SetText(fmt.Sprintf("正在处理: %d/%d", i+1, len(results)))
 
-			if err := os.MkdirAll(finalOutputDir, 0755); err != nil {
-				dialog.ShowError(fmt.Errorf("创建输出目录失败: %w", err), mainWindow)
-				return
-			}
-
-			processedCount := 0
-			// 循环处理每个文件
-			for i, fPath := range filesToProcess {
-				statusLabel.SetText(fmt.Sprintf("正在处理: %d/%d", i+1, len(filesToProcess)))
-
-				// 1. 提取数据
-				lot, wafer, counts, err := extractDataFromFile(fPath)
-				if err != nil {
-					if errors.Is(err, ErrNoData) {
-						// 可以选择在这里给用户一个提示，或者静默跳过
-						fmt.Printf("警告: 文件 %s 中没有数据，已跳过。\n", fPath)
-						continue // 跳过这个文件
-					}
-					// 对于其他错误，停止并报告
-					dialog.ShowError(fmt.Errorf("处理文件 %s 出错: %w", fPath, err), mainWindow)
-					return
-				}
-
-				// 2. 构建标题和输出路径
-				title := "未知"
-				if lot != "" && wafer != "" {
-					title = fmt.Sprintf("扩散批号：%s-%s", lot, wafer)
-				}
-				baseName := filepath.Base(fPath)
-				fileNameNoExt := strings.TrimSuffix(baseName, filepath.Ext(baseName))
+				fileNameNoExt := strings.TrimSuffix(result.FileName, filepath.Ext(result.FileName))
 				outFileName := fmt.Sprintf("%s_result.xlsx", fileNameNoExt)
 				outFilePath := filepath.Join(finalOutputDir, outFileName)
 
-				// 3. 写入Excel
-				err = writeToExcel(outFilePath, title, counts, dynamicBinNameMapping, defaultPrefix)
+				// 每次调用写入函数时，只传入包含当前文件结果的切片
+				err := writeToExcel(outFilePath, title, []fileResult{result}, dynamicBinNameMapping, defaultPrefix)
 				if err != nil {
-					dialog.ShowError(fmt.Errorf("写入文件 %s 的结果时出错: %w", fPath, err), mainWindow)
+					if errors.Is(err, ErrNoData) {
+						dialog.ShowError(fmt.Errorf("写入文件失败: %w", err), mainWindow)
+						continue // 静默跳过没有数据的文件
+					}
+					dialog.ShowError(fmt.Errorf("意外错误: %w", err), mainWindow)
 					return
 				}
-				processedCount++
 			}
 
-			statusLabel.SetText(fmt.Sprintf("处理完成！共 %d 个文件。", processedCount))
-			dialog.ShowInformation("成功", fmt.Sprintf("所有 %d 个文件已独立处理完毕！\n结果保存在: %s", processedCount, finalOutputDir), mainWindow)
+			statusLabel.SetText(fmt.Sprintf("处理完成！共 %d 个文件。", len(results)))
+			dialog.ShowInformation("成功", fmt.Sprintf("所有 %d 个文件已独立处理完毕！\n结果保存在: %s", len(results), finalOutputDir), mainWindow)
 		}
 	})
 	processButton.Importance = widget.HighImportance
