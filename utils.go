@@ -61,10 +61,10 @@ func writeToExcel(outputFilePath string, title string, results []fileResult, map
 	// 用于存储每列所需的最大宽度
 	colWidths := make(map[int]float64)
 
-	// 写入 "文件名" 表头 (A2)
-	f.SetCellValue(sheetName, "A2", "文件名")
+	// 写入 "扩散批号" 表头 (A2)
+	f.SetCellValue(sheetName, "A2", "扩散批号")
 	f.SetCellStyle(sheetName, "A2", "A2", headerStyle)
-	colWidths[1] = calculateApproxTextWidth("文件名") // 初始宽度
+	colWidths[1] = calculateApproxTextWidth("扩散批号") // 初始宽度
 
 	// 写入所有 key 的表头 (B2, C2, ...)
 	for i, key := range sortedAllKeys {
@@ -87,9 +87,10 @@ func writeToExcel(outputFilePath string, title string, results []fileResult, map
 	for i, result := range results {
 		rowNum := i + 3 // 从第3行开始
 
-		// 写入文件名 (列 A)
-		f.SetCellValue(sheetName, fmt.Sprintf("A%d", rowNum), result.FileName)
-		// 动态更新文件名列的所需宽度
+		id := fmt.Sprintf("%s-%s", result.Lot, result.Wafer)
+		// 写入扩散批号 (列 A)
+		f.SetCellValue(sheetName, fmt.Sprintf("A%d", rowNum), id)
+		// 动态更新扩散批号列的所需宽度
 		fileNameWidth := calculateApproxTextWidth(result.FileName)
 		if fileNameWidth > colWidths[1] {
 			colWidths[1] = fileNameWidth
